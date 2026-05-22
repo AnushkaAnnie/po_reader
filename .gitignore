@@ -1,0 +1,29 @@
+# Secrets - NEVER commit these
+.env
+service-account.json
+
+# Snapshots & logs (keep locally, not in git)
+snapshots/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
