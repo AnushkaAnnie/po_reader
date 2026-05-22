@@ -24,14 +24,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           python-version: '3.11'
 
       - name: Cache pip packages
         uses: actions/cache@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
@@ -42,10 +48,57 @@ jobs:
           playwright install chromium --with-deps
 
       - name: Create service account file
+        run: |
+          if [ -n "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
+            echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > service-account.json
+            echo "✅ Service account file created"
+          else
+            echo '{}' > service-account.json
+            echo "⚠️  GOOGLE_SERVICE_ACCOUNT_JSON secret not set — Google Sheets will be skipped"
+          fi
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+
+      - name: Check secrets configured
         run: |
-          echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > service-account.json
+          echo "Checking required secrets..."
+          MISSING=0
+
+          if [ -z "$V2RETAIL_SRM_URL" ]; then
+            echo "⚠️  V2RETAIL_SRM_URL not set in GitHub Secrets"
+            MISSING=1
+          else
+            echo "✅ V2RETAIL_SRM_URL is set"
+          fi
+
+          if [ -z "$V2RETAIL_SRM_USER" ]; then
+            echo "⚠️  V2RETAIL_SRM_USER not set in GitHub Secrets"
+            MISSING=1
+          else
+            echo "✅ V2RETAIL_SRM_USER is set"
+          fi
+
+          if [ -z "$V2RETAIL_SRM_PASS" ]; then
+            echo "⚠️  V2RETAIL_SRM_PASS not set in GitHub Secrets"
+            MISSING=1
+          else
+            echo "✅ V2RETAIL_SRM_PASS is set"
+          fi
+
+          if [ "$MISSING" = "1" ]; then
+            echo ""
+            echo "❌ Required secrets are missing."
+            echo "Go to: https://github.com/AnushkaAnnie/po_reader/settings/secrets/actions"
+            echo "Add: V2RETAIL_SRM_URL, V2RETAIL_SRM_USER, V2RETAIL_SRM_PASS, V2RETAIL_SHEET_ID"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ All required secrets are configured!"
+        env:
+          V2RETAIL_SRM_URL:  ${{ secrets.V2RETAIL_SRM_URL }}
+          V2RETAIL_SRM_USER: ${{ secrets.V2RETAIL_SRM_USER }}
+          V2RETAIL_SRM_PASS: ${{ secrets.V2RETAIL_SRM_PASS }}
 
       - name: Run automation
         env:
@@ -74,18 +127,28 @@ jobs:
           fi
           python main.py $ARGS
 
+      - name: Create logs dir if missing
+        if: always()
+        run: mkdir -p logs snapshots
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           name: srm-logs-${{ github.run_id }}
           path: logs/
           retention-days: 14
+          if-no-files-found: ignore
 
       - name: Upload snapshots
         if: always()
         uses: actions/upload-artifact@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           name: srm-snapshots-${{ github.run_id }}
           path: snapshots/
           retention-days: 30
+          if-no-files-found: ignore
