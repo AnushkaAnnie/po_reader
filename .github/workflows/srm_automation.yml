@@ -33,43 +33,59 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+      - name: Install Python dependencies (no playwright)
+        run: |
+          pip install \
+            python-dotenv==1.0.1 \
+            pyyaml==6.0.1 \
+            "google-api-python-client>=2.100.0" \
+            "google-auth>=2.20.0" \
+            google-auth-httplib2 \
+            requests \
+            colorlog \
+            selenium \
+            webdriver-manager
 
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
+      - name: Install Playwright via apt (pre-built, no download)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            chromium-browser \
+            chromium-chromedriver \
+            xvfb
+          chromium-browser --version
 
-      - name: Install Chromium browser binary
-        run: python -m playwright install chromium
+      - name: Install Playwright Python package only (no browser download)
+        run: |
+          pip install playwright==1.44.0
+          # Point playwright to use system chromium instead of downloading
+          echo "PLAYWRIGHT_BROWSERS_PATH=/usr/bin" >> $GITHUB_ENV
 
-      - name: Install Chromium system dependencies
-        run: sudo python -m playwright install-deps chromium
-
-      - name: Verify Playwright works
+      - name: Verify browser works
         run: |
           python -c "
-          from playwright.sync_api import sync_playwright
-          with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True, args=['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage'])
-              page = browser.new_page()
-              page.goto('https://example.com', timeout=15000)
-              print('Playwright browser OK — title:', page.title())
-              browser.close()
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.chrome.service import Service
+          opts = Options()
+          opts.add_argument('--headless')
+          opts.add_argument('--no-sandbox')
+          opts.add_argument('--disable-dev-shm-usage')
+          opts.binary_location = '/usr/bin/chromium-browser'
+          driver = webdriver.Chrome(options=opts)
+          driver.get('https://example.com')
+          print('Browser OK — title:', driver.title)
+          driver.quit()
           "
 
       - name: Create service account file
         run: |
           if [ -n "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
             echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > service-account.json
-            echo "✅ Service account file created"
+            echo "Service account file created"
           else
             echo '{}' > service-account.json
-            echo "⚠️  GOOGLE_SERVICE_ACCOUNT_JSON not set — Sheets sync will be skipped"
+            echo "GOOGLE_SERVICE_ACCOUNT_JSON not set - Sheets sync will be skipped"
           fi
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
@@ -77,15 +93,14 @@ jobs:
       - name: Check required secrets
         run: |
           MISSING=0
-          [ -z "$V2RETAIL_SRM_URL" ]  && echo "❌ Missing: V2RETAIL_SRM_URL"  && MISSING=1 || echo "✅ V2RETAIL_SRM_URL"
-          [ -z "$V2RETAIL_SRM_USER" ] && echo "❌ Missing: V2RETAIL_SRM_USER" && MISSING=1 || echo "✅ V2RETAIL_SRM_USER"
-          [ -z "$V2RETAIL_SRM_PASS" ] && echo "❌ Missing: V2RETAIL_SRM_PASS" && MISSING=1 || echo "✅ V2RETAIL_SRM_PASS"
+          [ -z "$V2RETAIL_SRM_URL" ]  && echo "MISSING: V2RETAIL_SRM_URL"  && MISSING=1 || echo "OK: V2RETAIL_SRM_URL"
+          [ -z "$V2RETAIL_SRM_USER" ] && echo "MISSING: V2RETAIL_SRM_USER" && MISSING=1 || echo "OK: V2RETAIL_SRM_USER"
+          [ -z "$V2RETAIL_SRM_PASS" ] && echo "MISSING: V2RETAIL_SRM_PASS" && MISSING=1 || echo "OK: V2RETAIL_SRM_PASS"
           if [ "$MISSING" = "1" ]; then
-            echo ""
             echo "Add secrets at: https://github.com/AnushkaAnnie/po_reader/settings/secrets/actions"
             exit 1
           fi
-          echo "✅ All required secrets present"
+          echo "All required secrets present"
         env:
           V2RETAIL_SRM_URL:  ${{ secrets.V2RETAIL_SRM_URL }}
           V2RETAIL_SRM_USER: ${{ secrets.V2RETAIL_SRM_USER }}
@@ -106,6 +121,8 @@ jobs:
           ALERT_EMAIL_TO:              ${{ secrets.ALERT_EMAIL_TO }}
           HEADLESS: "true"
           LOG_LEVEL: "INFO"
+          USE_SELENIUM: "true"
+          CHROMIUM_PATH: "/usr/bin/chromium-browser"
         run: |
           ARGS=""
           [ -n "${{ github.event.inputs.customer }}" ] && ARGS="--customer ${{ github.event.inputs.customer }}"

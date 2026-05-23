@@ -55,17 +55,17 @@ def run_pipeline(config: dict, dry_run: bool = False, test_login: bool = False):
 
     try:
         # ── Step 1: Auth ──────────────────────────────────────
-        pw, browser, context = start_browser(headless=HEADLESS)
-        page = context.new_page()
+        session, _, _ = start_browser(headless=HEADLESS)
+        pass  # session handles page internally
 
-        login(page, config)
+        login(session, config)
 
         if test_login:
             log.info("✅ Login test passed — stopping here (--test-login mode)")
             return {"status": "login_ok", "customer": customer}
 
         # ── Step 2: Crawl PO list ──────────────────────────────
-        po_list = extract_po_list(page, config)
+        po_list = extract_po_list(session, config)
 
         if not po_list:
             log.warning(f"⚠️  No POs found for {customer} — check crawler selectors")
@@ -75,7 +75,7 @@ def run_pipeline(config: dict, dry_run: bool = False, test_login: bool = False):
         log.info(f"🔎 Enriching PO details ({len(po_list)} POs)...")
         enriched = []
         for po in po_list:
-            enriched.append(extract_po_detail(page, po, config))
+            enriched.append(extract_po_detail(session, po, config))
 
         # ── Step 4: Validate ──────────────────────────────────
         valid_pos, quarantined = validate_po_list(enriched, config)
@@ -138,10 +138,10 @@ def run_pipeline(config: dict, dry_run: bool = False, test_login: bool = False):
     finally:
         # Always clean up browser
         try:
-            if page:    page.close()
-            if context: context.close()
-            if browser: browser.close()
-            if pw:      pw.stop()
+            pass
+            pass
+            pass
+            if session: session.stop()
         except Exception:
             pass
 
