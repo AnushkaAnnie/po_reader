@@ -44,21 +44,21 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Playwright + Chromium
-        run: |
-          pip install playwright
-          python -m playwright install chromium
-          python -m playwright install-deps chromium
+      - name: Install Chromium browser binary
+        run: python -m playwright install chromium
+
+      - name: Install Chromium system dependencies
+        run: sudo python -m playwright install-deps chromium
 
       - name: Verify Playwright works
         run: |
           python -c "
           from playwright.sync_api import sync_playwright
           with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+              browser = p.chromium.launch(headless=True, args=['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage'])
               page = browser.new_page()
-              page.goto('https://example.com')
-              print('✅ Playwright browser OK — title:', page.title())
+              page.goto('https://example.com', timeout=15000)
+              print('Playwright browser OK — title:', page.title())
               browser.close()
           "
 
