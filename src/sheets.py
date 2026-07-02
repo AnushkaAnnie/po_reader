@@ -1,103 +1,88 @@
 """
 sheets.py — Write PO changes to Google Sheets
-Handles: new rows, status updates, field updates, cancellation highlighting
+Columns: Date | PO Number | Status | Update Info | Category
+Status values: New Issued | Updated | Removed
 """
 
 import os
-import re
 from datetime import datetime
 from src.logger import get_logger
 
 log = get_logger()
 
-# ── Colours for row highlighting (RGB as integers for Sheets API) ──
-COLOR_NEW        = {"red": 0.85, "green": 0.93, "blue": 0.83}   # Light green
-COLOR_CANCELLED  = {"red": 0.96, "green": 0.80, "blue": 0.80}   # Light red
-COLOR_UPDATED    = {"red": 1.00, "green": 0.95, "blue": 0.80}   # Light amber
-COLOR_HEADER     = {"red": 0.20, "green": 0.20, "blue": 0.20}   # Dark grey
-COLOR_WHITE      = {"red": 1.00, "green": 1.00, "blue": 1.00}
+# ── Row colours ──
+COLOR_NEW       = {"red": 0.85, "green": 0.93, "blue": 0.83}   # Light green
+COLOR_CANCELLED = {"red": 0.96, "green": 0.80, "blue": 0.80}   # Light red
+COLOR_UPDATED   = {"red": 1.00, "green": 0.95, "blue": 0.80}   # Light amber
+COLOR_HEADER    = {"red": 0.13, "green": 0.13, "blue": 0.13}   # Dark
+COLOR_WHITE     = {"red": 1.00, "green": 1.00, "blue": 1.00}
+
+# ── Fixed headers ──
+HEADERS = ["Date", "PO Number", "Status", "Update Info", "Category"]
 
 
 def get_sheets_service():
-    """Build and return authenticated Google Sheets API service."""
     from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
 
     sa_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "./service-account.json")
     if not os.path.exists(sa_file):
         raise FileNotFoundError(
-            f"Google service account file not found: {sa_file}\n"
-            f"Please follow the setup guide in README.md to create one."
+            f"service-account.json not found at: {sa_file}\n"
+            f"Place the file in your project folder."
         )
-
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds  = Credentials.from_service_account_file(sa_file, scopes=scopes)
+    creds = Credentials.from_service_account_file(
+        sa_file,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
     return build("sheets", "v4", credentials=creds)
 
 
 def ensure_sheet_headers(service, spreadsheet_id: str, tab_name: str, col_map: dict):
-    """
-    Create the sheet tab if it doesn't exist and write column headers.
-    Safe to call on every run — only writes if headers are missing.
-    """
-    # Get existing sheets
+    """Create tab if missing and write headers. Safe to call every run."""
     meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-    sheet_titles = [s["properties"]["title"] for s in meta["sheets"]]
+    titles = [s["properties"]["title"] for s in meta["sheets"]]
 
-    if tab_name not in sheet_titles:
-        # Create the tab
-        body = {
-            "requests": [{
-                "addSheet": {"properties": {"title": tab_name}}
-            }]
-        }
+    if tab_name not in titles:
         service.spreadsheets().batchUpdate(
-            spreadsheetId=spreadsheet_id, body=body
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
         ).execute()
-        log.info(f"📄 Created sheet tab: {tab_name}")
+        log.info(f"📄 Created tab: {tab_name}")
 
-    # Check if header row already exists
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
-        range=f"{tab_name}!A1:Z1",
+        range=f"{tab_name}!A1:E1",
     ).execute()
     existing = result.get("values", [[]])[0]
 
-    # Build header row from column map (sort by column letter)
-    headers = _build_header_row(col_map)
-
-    if existing == headers:
-        log.debug("Sheet headers already correct")
+    if existing == HEADERS:
+        log.debug("Headers already correct")
         return
 
-    # Write headers
     service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
         range=f"{tab_name}!A1",
         valueInputOption="RAW",
-        body={"values": [headers]},
+        body={"values": [HEADERS]},
     ).execute()
 
-    # Format header row
     sheet_id = _get_sheet_id(service, spreadsheet_id, tab_name)
-    _format_header_row(service, spreadsheet_id, sheet_id)
-    log.info(f"✅ Sheet headers written to '{tab_name}'")
+    if sheet_id is not None:
+        _format_header_row(service, spreadsheet_id, sheet_id)
+
+    log.info(f"✅ Headers written: {HEADERS}")
 
 
 def write_changes_to_sheet(changes: dict, config: dict):
-    """
-    Main entry point — write all PO changes to the customer's Google Sheet.
-    """
-    sheet_id  = config["sheet_id"]
-    tab_name  = config["google_sheet"]["tab_name"]
-    col_map   = config["google_sheet"]["columns"]
-    customer  = config["customer_name"]
+    """Main entry point — write all PO changes to the sheet."""
+    sheet_id = config["sheet_id"]
+    tab_name = config["google_sheet"]["tab_name"]
+    col_map  = config["google_sheet"]["columns"]
+    customer = config["customer_name"]
 
     if not sheet_id or sheet_id == "YOUR_GOOGLE_SHEET_ID_HERE":
-        log.warning(
-            f"⚠️  Google Sheet ID not configured for {customer}. "
-            f"Set {config['google_sheet']['sheet_id_env']} in your .env file."
-        )
+        log.warning(f"⚠️  Sheet ID not set for {customer}")
         _log_changes_locally(changes, config)
         return
 
@@ -105,284 +90,237 @@ def write_changes_to_sheet(changes: dict, config: dict):
         service = get_sheets_service()
     except FileNotFoundError as e:
         log.warning(f"⚠️  {e}")
-        log.info("Writing changes to local log instead...")
         _log_changes_locally(changes, config)
         return
 
     ensure_sheet_headers(service, sheet_id, tab_name, col_map)
-
-    # Load existing data for lookups
     existing_data = _load_sheet_data(service, sheet_id, tab_name)
-
     summary = {"new": 0, "updated": 0, "cancelled": 0}
 
-    # ── Write new POs ──
-    if changes["new"]:
-        for po in changes["new"]:
-            _append_po_row(service, sheet_id, tab_name, col_map, po, COLOR_NEW)
-            summary["new"] += 1
-        log.info(f"📝 Wrote {summary['new']} new PO(s) to sheet")
+    # ── New POs ──
+    for po in changes.get("new", []):
+        row = _build_row(
+            po_number=po.get("po_number", ""),
+            status="New Issued",
+            update_info=f"PO issued — {po.get('vendor') or po.get('vendor_name', '')}".strip(" —"),
+            category=po.get("category", ""),
+        )
+        _append_row(service, sheet_id, tab_name, row)
+        _colour_last_row(service, sheet_id, tab_name, COLOR_NEW, existing_data)
+        summary["new"] += 1
 
-    # ── Update changed POs ──
-    if changes["updated"]:
-        for update in changes["updated"]:
-            row_idx = _find_row_by_po_number(
-                existing_data, update["po_number"], col_map
-            )
-            if row_idx:
-                _update_po_row(
-                    service, sheet_id, tab_name, col_map,
-                    update["current"], row_idx, COLOR_UPDATED
-                )
-                summary["updated"] += 1
-            else:
-                # PO not in sheet yet — add it
-                _append_po_row(
-                    service, sheet_id, tab_name, col_map,
-                    update["current"], COLOR_UPDATED
-                )
-                summary["updated"] += 1
-        log.info(f"✏️  Updated {summary['updated']} PO(s) in sheet")
+    # ── Updated POs ──
+    for upd in changes.get("updated", []):
+        # Build a human-readable summary of what changed
+        change_parts = []
+        for c in upd.get("changes", []):
+            flag = " (large change ⚠️)" if c.get("large_change") else ""
+            change_parts.append(f"{c['field']}: {c['old']} → {c['new']}{flag}")
+        update_info = " | ".join(change_parts) if change_parts else "Fields updated"
 
-    # ── Mark cancelled POs ──
-    if changes["cancelled"]:
-        for po in changes["cancelled"]:
-            row_idx = _find_row_by_po_number(
-                existing_data, po.get("po_number", ""), col_map
+        po = upd.get("current", {})
+        row_idx = _find_row(existing_data, upd["po_number"])
+
+        if row_idx:
+            # Update existing row in place
+            _update_row(
+                service, sheet_id, tab_name, row_idx,
+                _build_row(
+                    po_number=upd["po_number"],
+                    status="Updated",
+                    update_info=update_info,
+                    category=po.get("category", ""),
+                )
             )
-            if row_idx:
-                _mark_cancelled(
-                    service, sheet_id, tab_name, col_map, po, row_idx
+            _colour_row(service, sheet_id, tab_name, row_idx, COLOR_UPDATED)
+        else:
+            # PO not yet in sheet — add it
+            row = _build_row(
+                po_number=upd["po_number"],
+                status="Updated",
+                update_info=update_info,
+                category=po.get("category", ""),
+            )
+            _append_row(service, sheet_id, tab_name, row)
+            _colour_last_row(service, sheet_id, tab_name, COLOR_UPDATED, existing_data)
+
+        summary["updated"] += 1
+
+    # ── Cancelled / Removed POs ──
+    for po in changes.get("cancelled", []):
+        row_idx = _find_row(existing_data, po.get("po_number", ""))
+
+        if row_idx:
+            _update_row(
+                service, sheet_id, tab_name, row_idx,
+                _build_row(
+                    po_number=po.get("po_number", ""),
+                    status="Removed",
+                    update_info="PO cancelled / removed from portal",
+                    category=po.get("category", ""),
                 )
-                summary["cancelled"] += 1
-            else:
-                po["status"] = "CANCELLED"
-                _append_po_row(
-                    service, sheet_id, tab_name, col_map, po, COLOR_CANCELLED
-                )
-                summary["cancelled"] += 1
-        log.info(f"❌ Marked {summary['cancelled']} PO(s) as cancelled")
+            )
+            _colour_row(service, sheet_id, tab_name, row_idx, COLOR_CANCELLED)
+        else:
+            row = _build_row(
+                po_number=po.get("po_number", ""),
+                status="Removed",
+                update_info="PO cancelled / removed from portal",
+                category=po.get("category", ""),
+            )
+            _append_row(service, sheet_id, tab_name, row)
+            _colour_last_row(service, sheet_id, tab_name, COLOR_CANCELLED, existing_data)
+
+        summary["cancelled"] += 1
 
     log.info(
-        f"✅ Sheet sync complete — "
-        f"New: {summary['new']} | Updated: {summary['updated']} | Cancelled: {summary['cancelled']}"
+        f"✅ Sheet sync done — "
+        f"New Issued: {summary['new']} | "
+        f"Updated: {summary['updated']} | "
+        f"Removed: {summary['cancelled']}"
     )
 
 
 # ─────────────────────────────────────────────────────────────
-#  INTERNAL HELPERS
+#  ROW BUILDERS
 # ─────────────────────────────────────────────────────────────
 
-def _build_header_row(col_map: dict) -> list[str]:
-    """Convert column map (field → letter) to ordered header list."""
-    cols = sorted(col_map.items(), key=lambda x: x[1])
-    label_map = {
-        "po_number":    "PO Number",
-        "vendor_code":  "Vendor Code",
-        "vendor_name":  "Vendor Name",
-        "vendor":       "Vendor",
-        "po_date":      "PO Date",
-        "delivery_date":"Delivery Date",
-        "amount":       "Amount",
-        "currency":     "Currency",
-        "status":       "Status",
-        "line_items":   "Line Items",
-        "remarks":      "Remarks",
-        "last_synced":  "Last Synced",
-    }
-    return [label_map.get(field, field.replace("_", " ").title()) for field, _ in cols]
+def _build_row(po_number: str, status: str, update_info: str, category: str) -> list:
+    """Build a 5-column row: Date | PO Number | Status | Update Info | Category"""
+    return [
+        datetime.now().strftime("%d-%m-%Y"),   # A: Date
+        po_number,                              # B: PO Number
+        status,                                 # C: Status (New Issued / Updated / Removed)
+        update_info,                            # D: Update Info
+        _normalise_category(category),          # E: Category
+    ]
 
 
-def _po_to_row(po: dict, col_map: dict) -> list[str]:
-    """Convert a PO dict to an ordered list matching col_map columns."""
-    sorted_fields = sorted(col_map.items(), key=lambda x: x[1])
-    row = []
-    for field, _ in sorted_fields:
-        if field == "last_synced":
-            row.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        elif field == "vendor_name" and not po.get("vendor_name"):
-            row.append(po.get("vendor", ""))
-        else:
-            row.append(str(po.get(field, "")).strip())
-    return row
+def _normalise_category(raw: str) -> str:
+    """Map portal category text to Girls / Women / Unknown."""
+    if not raw:
+        return ""
+    r = raw.lower()
+    if "girl" in r:
+        return "Girls"
+    if "women" in r or "woman" in r or "ladies" in r:
+        return "Women"
+    return raw.title()
 
 
-def _col_letter_to_index(letter: str) -> int:
-    """Convert column letter (A=0, B=1, ...) to zero-based index."""
-    letter = letter.upper().strip()
-    result = 0
-    for char in letter:
-        result = result * 26 + (ord(char) - ord('A') + 1)
-    return result - 1
+# ─────────────────────────────────────────────────────────────
+#  SHEET OPERATIONS
+# ─────────────────────────────────────────────────────────────
 
-
-def _load_sheet_data(service, spreadsheet_id: str, tab_name: str) -> list[list]:
-    """Load all current sheet data."""
-    try:
-        result = service.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id,
-            range=f"{tab_name}!A:Z",
-        ).execute()
-        return result.get("values", [])
-    except Exception as e:
-        log.debug(f"Could not load sheet data: {e}")
-        return []
-
-
-def _find_row_by_po_number(
-    sheet_data: list[list], po_number: str, col_map: dict
-) -> int | None:
-    """
-    Find the 1-based row index of a PO in the sheet.
-    Returns None if not found.
-    """
-    if not po_number or not sheet_data:
-        return None
-
-    po_col_idx = _col_letter_to_index(col_map.get("po_number", "A"))
-
-    for idx, row in enumerate(sheet_data):
-        if idx == 0:
-            continue  # Skip header
-        if po_col_idx < len(row) and str(row[po_col_idx]).strip() == str(po_number).strip():
-            return idx + 1  # 1-based row number
-
-    return None
-
-
-def _append_po_row(service, spreadsheet_id, tab_name, col_map, po, color):
-    """Append a new row to the sheet."""
-    row = _po_to_row(po, col_map)
+def _append_row(service, spreadsheet_id: str, tab_name: str, row: list):
     service.spreadsheets().values().append(
         spreadsheetId=spreadsheet_id,
-        range=f"{tab_name}!A:A",
+        range=f"{tab_name}!A:E",
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body={"values": [row]},
     ).execute()
 
-    # Colour the row
-    sheet_id = _get_sheet_id(service, spreadsheet_id, tab_name)
-    if sheet_id is not None:
-        # Re-load to find the row we just added
-        data = _load_sheet_data(service, spreadsheet_id, tab_name)
-        row_idx = _find_row_by_po_number(data, po.get("po_number", ""), col_map)
-        if row_idx:
-            _highlight_row(service, spreadsheet_id, sheet_id, row_idx, color, len(col_map))
 
-
-def _update_po_row(service, spreadsheet_id, tab_name, col_map, po, row_idx, color):
-    """Update all cells in an existing row."""
-    row = _po_to_row(po, col_map)
-    num_cols = len(col_map)
-    end_col  = chr(ord('A') + num_cols - 1)
-    range_   = f"{tab_name}!A{row_idx}:{end_col}{row_idx}"
-
+def _update_row(service, spreadsheet_id: str, tab_name: str, row_idx: int, row: list):
     service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
-        range=range_,
+        range=f"{tab_name}!A{row_idx}:E{row_idx}",
         valueInputOption="RAW",
         body={"values": [row]},
     ).execute()
 
+
+def _colour_row(service, spreadsheet_id: str, tab_name: str, row_idx: int, color: dict):
     sheet_id = _get_sheet_id(service, spreadsheet_id, tab_name)
     if sheet_id is not None:
-        _highlight_row(service, spreadsheet_id, sheet_id, row_idx, color, num_cols)
+        _highlight_row(service, spreadsheet_id, sheet_id, row_idx, color)
 
 
-def _mark_cancelled(service, spreadsheet_id, tab_name, col_map, po, row_idx):
-    """Update status to CANCELLED and highlight row red."""
-    status_col = col_map.get("status", "H")
-    sync_col   = col_map.get("last_synced", "K")
-
-    updates = [
-        {
-            "range": f"{tab_name}!{status_col}{row_idx}",
-            "values": [["CANCELLED"]],
-        },
-        {
-            "range": f"{tab_name}!{sync_col}{row_idx}",
-            "values": [[datetime.now().strftime("%Y-%m-%d %H:%M:%S")]],
-        },
-    ]
-    service.spreadsheets().values().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"valueInputOption": "RAW", "data": updates},
-    ).execute()
-
-    sheet_id = _get_sheet_id(service, spreadsheet_id, tab_name)
-    if sheet_id is not None:
-        _highlight_row(
-            service, spreadsheet_id, sheet_id,
-            row_idx, COLOR_CANCELLED, len(col_map)
-        )
+def _colour_last_row(service, spreadsheet_id: str, tab_name: str, color: dict, existing_data: list):
+    """Colour the last row that was just appended."""
+    data = _load_sheet_data(service, spreadsheet_id, tab_name)
+    last_idx = len(data)  # 1-based, header is row 1
+    if last_idx > 1:
+        _colour_row(service, spreadsheet_id, tab_name, last_idx, color)
 
 
-def _highlight_row(service, spreadsheet_id, sheet_id, row_idx, color, num_cols):
-    """Set background colour for an entire row."""
-    request = {
-        "repeatCell": {
-            "range": {
-                "sheetId":          sheet_id,
-                "startRowIndex":    row_idx - 1,
-                "endRowIndex":      row_idx,
-                "startColumnIndex": 0,
-                "endColumnIndex":   num_cols,
-            },
-            "cell": {
-                "userEnteredFormat": {
-                    "backgroundColor": color
-                }
-            },
-            "fields": "userEnteredFormat.backgroundColor",
-        }
-    }
+def _find_row(sheet_data: list, po_number: str) -> int | None:
+    """Find 1-based row index by PO number (column B = index 1)."""
+    if not po_number or not sheet_data:
+        return None
+    for idx, row in enumerate(sheet_data):
+        if idx == 0:
+            continue  # skip header
+        if len(row) > 1 and str(row[1]).strip() == str(po_number).strip():
+            return idx + 1
+    return None
+
+
+def _load_sheet_data(service, spreadsheet_id: str, tab_name: str) -> list:
+    try:
+        result = service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=f"{tab_name}!A:E",
+        ).execute()
+        return result.get("values", [])
+    except Exception as e:
+        log.debug(f"Could not load sheet: {e}")
+        return []
+
+
+def _highlight_row(service, spreadsheet_id: str, sheet_id: int, row_idx: int, color: dict):
     service.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,
-        body={"requests": [request]},
-    ).execute()
-
-
-def _format_header_row(service, spreadsheet_id, sheet_id):
-    """Bold + dark background for header row."""
-    requests = [
-        {
+        body={"requests": [{
             "repeatCell": {
                 "range": {
-                    "sheetId": sheet_id,
-                    "startRowIndex": 0,
-                    "endRowIndex": 1,
+                    "sheetId":          sheet_id,
+                    "startRowIndex":    row_idx - 1,
+                    "endRowIndex":      row_idx,
+                    "startColumnIndex": 0,
+                    "endColumnIndex":   5,
                 },
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": COLOR_HEADER,
-                        "textFormat": {
-                            "bold": True,
-                            "foregroundColor": COLOR_WHITE,
-                        },
-                    }
-                },
-                "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                "cell": {"userEnteredFormat": {"backgroundColor": color}},
+                "fields": "userEnteredFormat.backgroundColor",
             }
-        },
-        {
-            "updateSheetProperties": {
-                "properties": {
-                    "sheetId": sheet_id,
-                    "gridProperties": {"frozenRowCount": 1},
-                },
-                "fields": "gridProperties.frozenRowCount",
-            }
-        },
-    ]
+        }]},
+    ).execute()
+
+
+def _format_header_row(service, spreadsheet_id: str, sheet_id: int):
     service.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,
-        body={"requests": requests},
+        body={"requests": [
+            {
+                "repeatCell": {
+                    "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": COLOR_HEADER,
+                            "textFormat": {
+                                "bold": True,
+                                "foregroundColor": COLOR_WHITE,
+                            },
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            },
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": sheet_id,
+                        "gridProperties": {"frozenRowCount": 1},
+                    },
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            },
+        ]},
     ).execute()
 
 
 def _get_sheet_id(service, spreadsheet_id: str, tab_name: str) -> int | None:
-    """Return the numeric sheetId for a named tab."""
     try:
         meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         for sheet in meta["sheets"]:
@@ -394,10 +332,8 @@ def _get_sheet_id(service, spreadsheet_id: str, tab_name: str) -> int | None:
 
 
 def _log_changes_locally(changes: dict, config: dict):
-    """Fallback: write changes to a local JSON file when Sheets is unavailable."""
     import json
     from pathlib import Path
-
     Path("logs").mkdir(exist_ok=True)
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = Path(f"logs/{config['customer_id']}_changes_{ts}.json")

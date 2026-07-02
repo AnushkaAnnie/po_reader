@@ -456,7 +456,7 @@ def _try_generic_text(text: str) -> list[dict]:
 def _map_row(headers: list, values: list) -> dict:
     po = {k: "" for k in ["po_number","vendor","vendor_code","amount",
                            "currency","status","po_date","delivery_date","remarks",
-                           "qty","article","risk","days"]}
+                           "qty","article","risk","days","category"]}
     for i, h in enumerate(headers):
         if i >= len(values):
             break
@@ -493,8 +493,19 @@ def _map_row(headers: list, values: list) -> dict:
             po["days"] = v
         elif "remark" in h or "note" in h:
             po["remarks"] = v
+        elif any(k in h for k in ["category","division","dept","department","segment","gender"]):
+            po["category"] = v
         elif not po["po_number"] and i == 0:
             po["po_number"] = v
+
+    # Infer category from article/vendor name if not found in columns
+    if not po["category"]:
+        combined = (po.get("article","") + " " + po.get("vendor","")).lower()
+        if "girl" in combined:
+            po["category"] = "Girls"
+        elif "women" in combined or "woman" in combined or "ladies" in combined:
+            po["category"] = "Women"
+
     return po
 
 

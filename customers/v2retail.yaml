@@ -6,39 +6,28 @@
 customer_id: v2retail
 customer_name: V2 Retail
 
-# Portal settings (values loaded from .env)
 portal_url_env: V2RETAIL_SRM_URL
 auth:
   username_env: V2RETAIL_SRM_USER
   password_env: V2RETAIL_SRM_PASS
 
-# Google Sheet settings
 google_sheet:
   sheet_id_env: V2RETAIL_SHEET_ID
   tab_name: PO Tracker
-  # Column mapping — which column holds which field
   columns:
-    po_number: A
-    vendor_code: B
-    vendor_name: C
-    po_date: D
-    delivery_date: E
-    amount: F
-    currency: G
-    status: H
-    line_items: I
-    remarks: J
-    last_synced: K
+    date: A
+    po_number: B
+    status: C
+    update_info: D
+    category: E
 
-# Crawler behaviour
 crawler:
-  po_list_path: /vendor/pending-pos       # URL path after portal_url
+  po_list_path: /vendor/pending-pos
   wait_after_login_ms: 3000
   wait_after_navigate_ms: 2000
-  scroll_to_load: true                 # For infinite scroll portals
-  max_pages: 50                        # Safety limit on pagination
+  scroll_to_load: true
+  max_pages: 50
 
-# Schedule
 schedule:
   interval_minutes: 120
   active_hours_start: "07:00"
@@ -46,16 +35,14 @@ schedule:
   timezone: Asia/Kolkata
   jitter_seconds: 90
 
-# Accuracy rules
 validation:
-  po_number_pattern: ".*"             # Adjust if PO numbers follow a pattern e.g. "^PO-\\d{6}$"
+  po_number_pattern: ".*"
   amount_min: 0
-  amount_change_alert_pct: 20        # Alert if amount changes by more than 20%
+  amount_change_alert_pct: 20
   required_fields:
     - po_number
     - status
 
-# Notifications
 notifications:
   on_new_po: true
   on_cancelled_po: true
